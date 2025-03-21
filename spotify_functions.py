@@ -49,7 +49,7 @@ def local_storage_init(filepath):
         listen_history = os.path.join(filepath, 'listen_history.csv')
         if not os.path.exists(listen_history):
             column_list = ['track_name', 'artist_name', 'album_name', 'played_at', 'played_at_timestamp', 'duration_ms',
-                           'track_id', 'popularity', 'meta_batch', 'is_running_song']
+                           'track_id', 'popularity', 'meta_batch', 'is_running_song', 'played_on_tracked_list']
             df = pd.DataFrame(columns=column_list)
             df.to_csv(listen_history, index=False)
             print('Listening history file initialized.')
@@ -336,7 +336,7 @@ def ts_difference(ts1, ts2):
     else:
         return '~' + str(diff_months) + ' months'
 
-def get_recently_played(sp, filepath):
+def get_recently_played(sp, filepath, tracked_only):
     # Function will return as much history as the API allows, between the most recent
     # and last-synchronized timestamps.
     lh_filename = os.path.join(filepath, 'listen_history.csv')
@@ -402,7 +402,8 @@ def get_recently_played(sp, filepath):
                 'track_id': track['id'],
                 'popularity': track['popularity'],
                 'meta_batch': batch,
-                'is_tracked_song': False  # used later when compared against the tracked playlist
+                'is_tracked_song': False,  # used later when compared against the tracked playlist
+                'played_on_tracked_list': False
             }
             all_tracks.append(track_data)
             # End of batch iteration loop.
@@ -429,12 +430,13 @@ def get_recently_played(sp, filepath):
 
     # Declare the column list to be used in dataframes.
     column_list = ['track_name', 'artist_name', 'album_name', 'played_at', 'played_at_timestamp',
-                   'duration_ms', 'track_id', 'popularity', 'meta_batch', 'is_tracked_song']
+                   'duration_ms', 'track_id', 'popularity', 'meta_batch', 'is_tracked_song', 'played_on_tracked_list']
 
     # Convert api results into a dataframe.
     recent_tracks_df = pd.DataFrame(all_tracks, columns=column_list)
 
-    # Read the complete running playlist into a dataframe.
+
+    # Read the complete running playlist into a dataframe
     all_tracks_filename = os.path.join(filepath, 'all_tracked_songs.csv')
     tracked_playlist_df = pd.read_csv(all_tracks_filename)
     tracked_playlist_track_ids = set(tracked_playlist_df['track_id'])
@@ -442,6 +444,8 @@ def get_recently_played(sp, filepath):
     # Update the 'is_running_song' column in the recent plays to an accurate value.
     mask = recent_tracks_df['track_id'].notna() & recent_tracks_df['track_id'].isin(tracked_playlist_track_ids)
     recent_tracks_df.loc[mask, 'is_tracked_song'] = True
+    if not tracked_only:
+        recent_tracks_df.loc[mask, 'played_on_tracked_list'] = True
 
     # Restrict column output of dataframe and write to csv.
     recent_tracks_df = recent_tracks_df[column_list]
@@ -552,7 +556,31 @@ def infer_updated_track_ids(storage_filepath, threshold=0.9):
             # Loop completed, go to next song in dynamic list.
         print('Spotify substitution testing complete.')
 
-def infer_history(storage_filepath, ms_in_24_hours=86400000):
+def get_track_positions(recent_df, dynamic_df, shuffle_off):
+    # if shuffle is off, gets the max played position and asks the user if specific songs were played
+    # otherwise returns just the positions of the songs that were played.
+    track_positions = dynamic_df.loc[dynamic_df['track_id'].isin(recent_df['track_id']), 'position']
+    if shuffle_off:
+        current_position = track_positions.max()
+        # Loop through the next x songs on the playlist
+        while current_position < len(dynamic_df):
+            track_name = dynamic_df.loc[current_position]['track_name']
+            artist_name = dynamic_df.loc[current_position]['artist_name']
+
+            # Ask user if song was played
+            played = input('Was ' + track_name + ' by ' + artist_name + ' played? (Y/N) --> ')
+
+            # Append position if true.
+            if played.lower() == 'y':
+                track_positions = pd.concat([track_positions, pd.Series([current_position])])
+                current_position += 1
+            else:
+                break
+        return track_positions
+    else:
+        return track_positions
+
+def infer_history(storage_filepath, shuffle_off, ms_in_24_hours=86400000):
     # Compares the recently played history to the dynamically generated playlist.
     # Spotify won't necessarily return all songs listened to on a garmin watch, but we can 'infer'
     # the listening history by looking at recent playlist history, and seeing which
@@ -567,19 +595,20 @@ def infer_history(storage_filepath, ms_in_24_hours=86400000):
     print('Inferring history between', len(recent_df), 'recently played songs and the dynamic playlist.')
 
     # Limit recent history to only songs played on the tracked playlist
-    tracked_df = recent_df[recent_df['is_tracked_song'] == True].copy()
+    recent_and_tracked_df = recent_df[recent_df['is_tracked_song'] == True].copy()
 
     # Cutoff songs played more than a day prior to the most recently played song.
-    most_recent_timestamp = tracked_df['played_at_timestamp'].max()
-    most_recent_played_at = tracked_df['played_at'].max()
+    most_recent_timestamp = recent_and_tracked_df['played_at_timestamp'].max()
+    most_recent_played_at = recent_and_tracked_df['played_at'].max()
     cutoff_timestamp = most_recent_timestamp - ms_in_24_hours
-    tracked_df_short = tracked_df[tracked_df['played_at_timestamp'] > cutoff_timestamp].copy()
+    recent_short_df = recent_and_tracked_df[recent_and_tracked_df['played_at_timestamp'] > cutoff_timestamp].copy()
 
     # Add the 'row number' or 'song position' to the dynamic playlist.
     dyn_df['position'] = range(len(dyn_df))
 
     # Iterate through track list to locate the song position of the recently played songs.
-    track_positions = dyn_df.loc[dyn_df['track_id'].isin(tracked_df_short['track_id']), 'position']
+    track_positions = get_track_positions(recent_short_df, dyn_df, shuffle_off)
+
     print(len(track_positions), 'recently played songs found on tracked playlist.')
 
     # Infer the play history as all records of the dynamic playlist <= than the max play history
@@ -591,6 +620,7 @@ def infer_history(storage_filepath, ms_in_24_hours=86400000):
         inferred_plays_df = inferred_plays_df.drop(['artist_id', 'album_id', 'position'], axis=1) # drop misc columns
         inferred_plays_df['meta_batch'] = 0  # batch is set to zero for inferred plays
         inferred_plays_df['is_tracked_song'] = True  # we know these are all running songs
+        inferred_plays_df['played_on_tracked_list'] = True # these were definitely from the tracked list as well
         inferred_plays_df['played_at'] = most_recent_played_at # inferred songs all have the same timestamp.
         inferred_plays_df['played_at_timestamp'] = most_recent_timestamp
         inferred_filename = os.path.join(storage_filepath, 'inferred.csv')
@@ -599,6 +629,10 @@ def infer_history(storage_filepath, ms_in_24_hours=86400000):
 
         # Combine the inferred history with recently played history
         combined_df = pd.concat([recent_df, inferred_plays_df], ignore_index=True)
+
+        # Re-sort the dataframe to ensure any inferred plays properly keep the 'played on tracked list' value.
+        combined_df = combined_df.sort_values(by=['played_on_tracked_list', 'played_at_timestamp', 'track_id'],
+                                              ascending=[False, False, True])
         combined_df = combined_df.drop_duplicates(subset=['played_at_timestamp', 'track_id'], keep='first')
         combined_df.to_csv(recently_played_fn, index=False)
     else:
@@ -617,7 +651,7 @@ def merge_play_history(storage_filepath):
         # Declaration of common columns the output file needs.
         print('Starting merge assessment for', len(recent_df), 'songs.')
         column_list = ['track_name', 'artist_name', 'album_name', 'played_at', 'played_at_timestamp',
-                       'duration_ms', 'track_id', 'meta_batch', 'is_tracked_song']
+                       'duration_ms', 'track_id', 'meta_batch', 'is_tracked_song', 'played_on_tracked_list']
         recent_df = recent_df[column_list]
 
         history_fn = os.path.join(storage_filepath, 'listen_history.csv')
@@ -631,8 +665,9 @@ def merge_play_history(storage_filepath):
         merged_df = pd.concat([history_df, recent_df], ignore_index=True)
 
         # Sort dataframe by last played time. If multiple songs played at same time, sort by song.
-        merged_df = merged_df.sort_values(by=['track_id', 'played_at'], ascending=[True, False])
-        merged_df = merged_df.drop_duplicates(subset=['played_at_timestamp', 'track_id'])
+        merged_df = merged_df.sort_values(by=['track_id', 'played_at', 'played_on_tracked_list'],
+                                          ascending=[True, False, False])
+        merged_df = merged_df.drop_duplicates(subset=['played_at_timestamp', 'track_id'], keep='first')
         merged_df = merged_df.reset_index(drop=True)
 
         # Initialize clean list of songs
@@ -767,7 +802,7 @@ def star_plays(row):
     col_name = str(star_value) + '_star_recent_plays'
     return row[col_name]
 
-def update_rankings(storage_filepath):
+def update_rankings(storage_filepath, tracked_only):
     # Loads the play history and running files. Calculates listening stats by star level.
     # Asks users to update ratings for recently played and 0-star songs.
     # Writes an updated rankings file which is later used to re-write playlists.
@@ -821,6 +856,10 @@ def update_rankings(storage_filepath):
     column_list = ['track_id', 'track_name', 'artist_name', 'duration_ms', 'star_rating']
     updated_ratings = updated_ratings[column_list]
 
+    # Depending on user history, only calculate listening history if the songs were on the tracked list.
+    if tracked_only:
+        history_df = history_df[history_df['played_on_tracked_list']]
+
     # Determine the max played at time for any given track.
     last_played = history_df.groupby('track_id')['played_at'].max().reset_index()
     last_played.rename(columns={'played_at': 'last_played'}, inplace=True)
@@ -831,7 +870,7 @@ def update_rankings(storage_filepath):
 
     # intervals = [5: 14, 30, 60, 90, 180]
     # Create a dictionary that corresponds to the star values and the days of recent play history to calculate
-    intervals = {5: 14, 4: 30, 3: 60, 2: 90, 1: 180}
+    intervals = {5: 14, 4: 21, 3: 42, 2: 56, 1: 70}
 
     # Set the current UTC timestamp so we have a point of comparison
     today = datetime.now(pytz.UTC)
