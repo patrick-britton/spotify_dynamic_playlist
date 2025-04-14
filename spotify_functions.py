@@ -563,19 +563,19 @@ def get_track_positions(recent_df, dynamic_df, shuffle_off):
     if shuffle_off:
         current_position = track_positions.max()
         # Loop through the next x songs on the playlist
-        while current_position < len(dynamic_df):
+        while current_position >=0:
             track_name = dynamic_df.loc[current_position]['track_name']
             artist_name = dynamic_df.loc[current_position]['artist_name']
 
             # Ask user if song was played
-            played = input('Was ' + track_name + ' by ' + artist_name + ' played? (Y/N) --> ')
+            played = input('(' + str(current_position) + ') Was ' + track_name + ' by ' + artist_name + ' played? (Y/N) --> ')
 
             # Append position if true.
             if played.lower() == 'y':
-                track_positions = pd.concat([track_positions, pd.Series([current_position])])
-                current_position += 1
-            else:
                 break
+            else:
+                track_positions = track_positions.head(len(track_positions)-1)
+                current_position = track_positions.max()
         return track_positions
     else:
         return track_positions
@@ -607,6 +607,12 @@ def infer_history(storage_filepath, shuffle_off, ms_in_24_hours=86400000):
     dyn_df['position'] = range(len(dyn_df))
 
     # Iterate through track list to locate the song position of the recently played songs.
+    print('Testing track positions beyond',
+          len(recent_short_df),
+          'songs. From:',
+          recent_df['played_at'].min(),
+          'to',
+          recent_df['played_at'].max())
     track_positions = get_track_positions(recent_short_df, dyn_df, shuffle_off)
 
     print(len(track_positions), 'recently played songs found on tracked playlist.')
@@ -758,7 +764,8 @@ def star_review(cutoff_time, df):
 
     # Iterate through the dataframe
     for index, row in updated_df.iterrows():
-        if row['star_rating'] == 0 or pd.to_datetime(row['last_played']) > cutoff_time:
+        track_last_played = pd.to_datetime(row['last_played'])
+        if row['star_rating'] == 0 or track_last_played > cutoff_time:
             track_name = row['track_name']
             artist_name = row['artist_name']
             curr_rating = row['star_rating']
@@ -766,7 +773,8 @@ def star_review(cutoff_time, df):
             # Get the user to input a new rating
             print('**** Star Rating Review ****')
             input_string = (track_name[:40] + ' by ' + artist_name[:40] + '|| Current rating: '
-                            + str(curr_rating) + ' -->')
+                            + str(curr_rating) + ' --> ')
+            # print('Cutoff time is:', cutoff_time, 'vs', track_last_played)
             new_rating = input(input_string)
 
             # Adjust to acceptable input patterns
